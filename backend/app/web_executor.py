@@ -83,18 +83,21 @@ def _by(kind):
     return BY_ALIASES.get((kind or "css").lower(), "css selector")
 
 
-def build_driver():
+def build_driver(settings=None):
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
 
+    settings = settings or {}
     options = Options()
-    options.add_argument("--headless=new")
+    if settings.get("headless", True):
+        options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1280,900")
     options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-    if SELENIUM_URL:
-        return webdriver.Remote(command_executor=SELENIUM_URL, options=options)
+    remote_url = settings.get("selenium_remote_url") or SELENIUM_URL
+    if remote_url:
+        return webdriver.Remote(command_executor=remote_url, options=options)
     return webdriver.Chrome(options=options)
 
 
@@ -107,7 +110,9 @@ def execute_web_case(case, base_url, variables=None, evidence_dir=None):
     request_info = {"base_url": base_url, "steps": [s for s in (case.steps or [])]}
 
     try:
-        driver = build_driver()
+        # Keep the zero-argument call compatible with lightweight test doubles
+        # and local callers that do not provide project settings.
+        driver = build_driver(variables) if variables else build_driver()
     except Exception as exc:
         return {
             "status": "error",
@@ -129,15 +134,20 @@ def execute_web_case(case, base_url, variables=None, evidence_dir=None):
                 run_step(driver, action, step, base_url, variables)
                 entry["detail"] = describe_step(action, step, base_url, variables)
             except Exception as exc:
+                error_step = {
+                    **step,
+                    "action": action,
+                    "timeout": step.get("timeout", variables.get("default_timeout_seconds", 10)),
+                }
                 entry["status"] = "failed"
-                entry["detail"] = friendly_web_error(exc, {**step, "action": action})
+                entry["detail"] = friendly_web_error(exc, error_step)
                 step_log.append(entry)
                 return finalize(
                     driver, case, request_info, step_log, started, evidence_dir,
                     status="failed", summary=f"步骤 {step_no} 执行失败：{action}",
                     failure={
                         "category": "web_step_failed",
-                        "summary": friendly_web_error(exc, {**step, "action": action}),
+                        "summary": friendly_web_error(exc, error_step),
                         "step_no": step_no,
                         "action": action,
                         "locator": {"by": step.get("by") or "css", "selector": step.get("selector")},
@@ -195,7 +205,7 @@ def run_step(driver, action, step, base_url, variables):
     by = _by(step.get("by"))
     selector = render(step.get("selector"), variables)
     value = render(step.get("value"), variables)
-    timeout = float(step.get("timeout", 10))
+    timeout = float(step.get("timeout", variables.get("default_timeout_seconds", 10)))
 
     if action in ("navigate", "open", "goto"):
         driver.get(resolve_url(render(step.get("target") or value, variables), base_url))
