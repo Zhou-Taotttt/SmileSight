@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import traceback
 
 from .api_run_service import execute_api_run
+from .automation_run_service import execute_web_run
 from .performance_service import execute_jmeter_run
 from .db import SessionLocal
 from .models import AsyncTask, Project
@@ -37,7 +38,8 @@ def execute_async_task(task_id: int, expected_attempt: int | None = None) -> dic
             raise ValueError("project not found")
         task.status = "running"
         task.progress = 0
-        task.message = "正在准备性能测试" if task.task_type == "performance" else "正在准备接口测试"
+        task_label = {"api": "接口测试", "web": "Web 自动化", "performance": "性能测试"}.get(task.task_type, task.task_type)
+        task.message = f"正在准备{task_label}"
         task.started_at = datetime.now(timezone.utc)
         task.finished_at = None
         db.commit()
@@ -46,12 +48,12 @@ def execute_async_task(task_id: int, expected_attempt: int | None = None) -> dic
             db.refresh(task, attribute_names=["status"])
             return task.status in {"cancel_requested", "cancelled"}
 
-        def update_api_progress(completed: int, total: int, _result: dict) -> None:
+        def update_case_progress(completed: int, total: int, _result: dict) -> None:
             db.refresh(task, attribute_names=["status"])
             if task.status not in {"cancel_requested", "cancelled"}:
                 task.status = "running"
             task.progress = 100 if total == 0 else int(completed * 100 / total)
-            task.message = f"已执行 {completed}/{total} 条接口用例"
+            task.message = f"已执行 {completed}/{total} 条{task_label}用例"
             db.commit()
 
         payload = task.payload or {}
@@ -71,13 +73,22 @@ def execute_async_task(task_id: int, expected_attempt: int | None = None) -> dic
                 progress_callback=update_performance_progress,
                 cancel_callback=cancellation_requested,
             )
+        elif task.task_type == "web":
+            result = execute_web_run(
+                db,
+                project,
+                int(payload["environment_id"]),
+                payload.get("case_ids"),
+                progress_callback=update_case_progress,
+                cancel_callback=cancellation_requested,
+            )
         else:
             result = execute_api_run(
                 db,
                 project,
                 int(payload["environment_id"]),
                 payload.get("case_ids"),
-                progress_callback=update_api_progress,
+                progress_callback=update_case_progress,
                 cancel_callback=cancellation_requested,
             )
         db.refresh(task)
@@ -89,13 +100,13 @@ def execute_async_task(task_id: int, expected_attempt: int | None = None) -> dic
             task.message = (
                 "性能任务已取消，JMeter 进程已终止"
                 if task.task_type == "performance"
-                else "任务已取消，当前接口请求执行完毕后停止"
+                else f"{task_label}任务已取消，当前用例执行完毕后停止"
             )
             task.progress = min(task.progress, 99)
         else:
             task.status = "completed"
             task.progress = 100
-            task.message = "性能测试执行完成" if task.task_type == "performance" else "接口测试执行完成"
+            task.message = f"{task_label}执行完成"
         db.commit()
         return {"task_id": task.id, "status": task.status, "result": result}
     except Exception as exc:
