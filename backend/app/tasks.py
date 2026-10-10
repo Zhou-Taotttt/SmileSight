@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import traceback
 
 from .api_run_service import execute_api_run
-from .automation_run_service import execute_web_run
+from .automation_run_service import execute_app_run, execute_web_run
 from .performance_service import execute_jmeter_run
 from .db import SessionLocal
 from .models import AsyncTask, Project
@@ -38,7 +38,7 @@ def execute_async_task(task_id: int, expected_attempt: int | None = None) -> dic
             raise ValueError("project not found")
         task.status = "running"
         task.progress = 0
-        task_label = {"api": "接口测试", "web": "Web 自动化", "performance": "性能测试"}.get(task.task_type, task.task_type)
+        task_label = {"api": "接口测试", "web": "Web 自动化", "app": "App 自动化", "performance": "性能测试"}.get(task.task_type, task.task_type)
         task.message = f"正在准备{task_label}"
         task.started_at = datetime.now(timezone.utc)
         task.finished_at = None
@@ -79,6 +79,18 @@ def execute_async_task(task_id: int, expected_attempt: int | None = None) -> dic
                 project,
                 int(payload["environment_id"]),
                 payload.get("case_ids"),
+                progress_callback=update_case_progress,
+                cancel_callback=cancellation_requested,
+            )
+        elif task.task_type == "app":
+            result = execute_app_run(
+                db,
+                project,
+                int(payload["environment_id"]),
+                payload.get("case_ids"),
+                capabilities=payload.get("capabilities"),
+                device_config=payload.get("device_config"),
+                server_url=payload.get("server_url"),
                 progress_callback=update_case_progress,
                 cancel_callback=cancellation_requested,
             )
